@@ -30,14 +30,15 @@ URL_PATTERN = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id == ADMIN_ID:
-        await update.message.reply_text("বট সচল! আইডি স্ক্যান ও রিপ্লাই সিস্টেম এখন সঠিক আইডিতে কাজ করবে।")
+        await update.message.reply_text("বট সচল! এখন আপনি নিজের আইডি গোপন রেখে মেসেজ পাঠাতে, রিপ্লাই দিতে এবং যেকোনো মেসেজ ডিলিট করতে পারবেন।")
 
 async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """গ্রুপের মেসেজ স্ক্যান করা ও সঠিক আইডি প্রদান করা"""
     if update.effective_chat.id != GROUP_ID:
         return
     
-    # এডমিন মেসেজ দিলে বট কোনো হস্তক্ষেপ করবে না
+    # এডমিন মেসেজ দিলে বট কোনো হস্তক্ষেপ করবে না, তবে এডমিনের মেসেজ আইডিও দেখাবে না
+    # যদি আপনি চান নিজের পাঠানো মেসেজেরও আইডি দেখাবে তবে নিচের ৩ লাইন রিমুভ করতে পারেন
     if update.effective_user.id == ADMIN_ID:
         return
 
@@ -45,7 +46,7 @@ async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TY
     user_name = update.effective_user.first_name
     text_content = update.message.text or update.message.caption or ""
 
-    # ৩. লিংক ফিল্টার
+    # ৩. লিংক ফিল্টার (ইউজার লিংক দিলে সাথে সাথে ডিলিট)
     if re.search(URL_PATTERN, text_content):
         try:
             await context.bot.delete_message(chat_id=GROUP_ID, message_id=original_msg_id)
@@ -53,9 +54,8 @@ async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TY
         except:
             pass
 
-    # ৪. মেসেজ পুনরায় পাঠানো এবং নতুন ID সংগ্রহ করা
+    # ৪. মেসেজ পুনরায় পাঠানো এবং বটের নিজের মেসেজের ID সংগ্রহ করা
     try:
-        # অস্থায়ী আইডি যেটা কপি করতে পারবেন (পরে এটা নতুন আইডিতে আপডেট হবে)
         prefix_temp = f"👤 User: <b>{user_name}</b>\n\n"
         sent_msg = None
 
@@ -69,7 +69,7 @@ async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TY
             sent_msg = await context.bot.send_document(chat_id=GROUP_ID, document=update.message.document.file_id, caption=prefix_temp + (update.message.caption or ""), parse_mode=ParseMode.HTML)
 
         if sent_msg:
-            # এখন বটের নিজের পাঠানো মেসেজের ID দিয়ে টেক্সট আপডেট করা যাতে কপি করে রিপ্লাই দেওয়া যায়
+            # বটের পাঠানো মেসেজের নতুন ID দিয়ে টেক্সট আপডেট (কপি-টু-ক্লিক সুবিধা)
             new_id = sent_msg.message_id
             final_text = f"🆔 ID: <code>{new_id}</code>\n👤 User: <b>{user_name}</b>\n\n"
             
@@ -78,14 +78,14 @@ async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TY
             else:
                 await sent_msg.edit_caption(caption=final_text + (update.message.caption or ""), parse_mode=ParseMode.HTML)
 
-        # ইউজারের আগের মেসেজটি ডিলিট করা
+        # ইউজারের মূল মেসেজ ডিলিট করা
         await context.bot.delete_message(chat_id=GROUP_ID, message_id=original_msg_id)
 
     except Exception as e:
         logging.error(f"Scanning error: {e}")
 
 async def reply_to_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """সঠিক আইডি ব্যবহার করে রিপ্লাই দেওয়া"""
+    """বটের ইনবক্স থেকে গ্রুপে রিপ্লাই দেওয়া"""
     if update.effective_user.id != ADMIN_ID: return
     try:
         args = context.args
@@ -96,36 +96,43 @@ async def reply_to_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_id = int(args[0])
         reply_text = " ".join(args[1:])
         
-        # বটের পাঠানো নতুন আইডিতে সরাসরি রিপ্লাই যাবে
+        # রিপ্লাই পাঠানো
         await context.bot.send_message(chat_id=GROUP_ID, text=reply_text, reply_to_message_id=target_id)
         await update.message.reply_text("সফলভাবে রিপ্লাই দেওয়া হয়েছে।")
     except Exception as e:
-        await update.message.reply_text(f"Error: {e}\nহয়তো আইডিটি সঠিক নয় বা মেসেজটি অনেক পুরনো।")
+        await update.message.reply_text(f"ভুল: {e}")
 
 async def delete_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """আইডি দিয়ে মেসেজ ডিলিট করা"""
+    """যেকোনো মেসেজ আইডি দিয়ে ডিলিট করা (বটের নিজের বা অন্য এডমিনের)"""
     if update.effective_user.id != ADMIN_ID: return
     try:
         if not context.args:
             await update.message.reply_text("সঠিক নিয়ম: /delete [ID]")
             return
+        
         target_id = int(context.args[0])
+        
+        # গ্রুপ থেকে মেসেজটি ডিলিট করা
         await context.bot.delete_message(chat_id=GROUP_ID, message_id=target_id)
-        await update.message.reply_text(f"মেসেজ {target_id} ডিলিট করা হয়েছে।")
+        await update.message.reply_text(f"মেসেজ (ID: {target_id}) সফলভাবে ডিলিট করা হয়েছে।")
     except Exception as e:
-        await update.message.reply_text(f"ডিলিট করা যায়নি: {e}")
+        await update.message.reply_text(f"ডিলিট করা যায়নি! ভুল: {e}\n(সম্ভবত মেসেজটি ডিলিট হয়ে গেছে বা বট এডমিন নয়)")
 
 async def handle_admin_private(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """এডমিনের সরাসরি মেসেজ গ্রুপে পাঠানো"""
+    """এডমিন প্রাইভেটে কিছু পাঠালে তা গ্রুপে বটের নামে যাবে"""
     if update.effective_user.id != ADMIN_ID: return
     try:
+        sent_msg = None
         if update.message.text:
-            await context.bot.send_message(chat_id=GROUP_ID, text=update.message.text)
+            sent_msg = await context.bot.send_message(chat_id=GROUP_ID, text=update.message.text)
         elif update.message.photo:
-            await context.bot.send_photo(chat_id=GROUP_ID, photo=update.message.photo[-1].file_id, caption=update.message.caption)
-        await update.message.reply_text("গ্রুপে পাঠানো হয়েছে।")
+            sent_msg = await context.bot.send_photo(chat_id=GROUP_ID, photo=update.message.photo[-1].file_id, caption=update.message.caption)
+        
+        if sent_msg:
+            # আপনি যদি চান আপনার পাঠানো মেসেজ ডিলিট করতে হতে পারে, তবে আইডিটি আপনাকে জানিয়ে দিবে
+            await update.message.reply_text(f"গ্রুপে পাঠানো হয়েছে।\nমেসেজ আইডি: <code>{sent_msg.message_id}</code>", parse_mode=ParseMode.HTML)
     except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+        await update.message.reply_text(f"ভুল: {e}")
 
 if __name__ == '__main__':
     threading.Thread(target=run_web_server, daemon=True).start()
