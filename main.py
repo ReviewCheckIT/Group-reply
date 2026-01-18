@@ -2,168 +2,140 @@ import os
 import logging
 import threading
 import re
-import asyncio
 from flask import Flask
 from telegram import Update, ChatPermissions
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# ১. Render এর পোর্টের জন্য ফ্লাস্ক অ্যাপ
+# ১. Render এর জন্য Web Server
 web_app = Flask(__name__)
-
 @web_app.route('/')
 def home():
-    return "Bot is running perfectly!"
+    return "Bot is Running!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
     web_app.run(host='0.0.0.0', port=port)
 
-# ২. লগিং কনফিগারেশন
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-
-# ৩. এনভায়রনমেন্ট ভেরিয়েবল (Render-এ সেট করবেন)
+# ২. কনফিগারেশন
+logging.basicConfig(level=logging.INFO)
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 GROUP_ID = int(os.getenv("GROUP_ID"))
-
-# ৪. সুরক্ষা ও ফিল্টার Regex
 URL_PATTERN = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+|t\.me/\S+'
 
-# ৫. কমান্ড লিস্ট (শুধুমাত্র এডমিনের জন্য)
-HELP_TEXT = """
-🔥 **Super Admin Control Panel** 🔥
-
-🚀 **ইউজার ম্যানেজমেন্ট:**
-• `/ban [User_ID]` - ইউজারকে পার্মানেন্ট ব্যান করা।
-• `/unban [User_ID]` - ব্যন রিমুভ করা।
-• `/kick [User_ID]` - গ্রুপ থেকে বের করে দেয়া।
-• `/mute [User_ID]` - ইউজারকে মিউট করা (কথা বলতে পারবে না)।
-• `/unmute [User_ID]` - মিউট রিমুভ করা।
-
-🛠 **গ্রুপ কন্ট্রোল:**
-• `/pin [Msg_ID]` - যেকোনো মেসেজ পিন করা।
-• `/unpin` - পিন মেসেজ রিমুভ করা।
-• `/slow [সেকেন্ড]` - মেসেজ পাঠানোর গতি নিয়ন্ত্রণ করা।
-• `/delete [Msg_ID]` - নির্দিষ্ট মেসেজ ডিলিট করা।
-• `/set_title [নাম]` - গ্রুপের নাম পরিবর্তন।
-• `/set_desc [বর্ণনা]` - গ্রুপের ডেসক্রিপশন পরিবর্তন।
-
-💬 **মেসেজ রিপ্লাই:**
-• `/reply [Msg_ID] [Text]` - ইউজারের মেসেজে রিপ্লাই দেয়া।
-"""
-
-# --- হ্যান্ডলার ফাংশনসমূহ ---
-
+# ৩. স্টার্ট কমান্ড (এডমিনের জন্য কমান্ড লিস্ট)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id == ADMIN_ID:
-        await update.message.reply_text(HELP_TEXT, parse_mode=ParseMode.MARKDOWN)
+        msg = (
+            "🛠 **বট কন্ট্রোল প্যানেল সচল**\n\n"
+            "📌 **ম্যানেজমেন্ট কমান্ডস:**\n"
+            "• `/reply [ID] [Text]` - মেসেজে রিপ্লাই দেওয়া\n"
+            "• `/del [ID]` - নির্দিষ্ট মেসেজ ডিলিট করা\n"
+            "• `/ban [User_ID]` - ইউজারকে ব্যান করা\n"
+            "• `/mute [User_ID]` - ইউজারকে মিউট করা\n"
+            "• `/unmute [User_ID]` - মিউট খোলা\n"
+            "• `/kick [User_ID]` - গ্রুপ থেকে বের করা\n"
+            "• `/pin [ID]` - মেসেজ পিন করা\n"
+            "• `/purge [Amount]` - অনেক মেসেজ একসাথে ডিলিট\n\n"
+            "💡 *টিপস:* গ্রুপে যা পাঠাতে চান, সরাসরি এখানে লিখুন।"
+        )
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
-async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
-    try:
-        user_id = int(context.args[0])
-        await context.bot.ban_chat_member(chat_id=GROUP_ID, user_id=user_id)
-        await update.message.reply_text(f"✅ User {user_id} কে ব্যান করা হয়েছে।")
-    except Exception as e: await update.message.reply_text(f"Error: {e}")
-
-async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
-    try:
-        user_id = int(context.args[0])
-        permissions = ChatPermissions(can_send_messages=False)
-        await context.bot.restrict_chat_member(chat_id=GROUP_ID, user_id=user_id, permissions=permissions)
-        await update.message.reply_text(f"🔇 User {user_id} কে মিউট করা হয়েছে।")
-    except Exception as e: await update.message.reply_text(f"Error: {e}")
-
-async def unmute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
-    try:
-        user_id = int(context.args[0])
-        permissions = ChatPermissions(can_send_messages=True, can_send_media_messages=True, can_send_polls=True, can_send_other_messages=True)
-        await context.bot.restrict_chat_member(chat_id=GROUP_ID, user_id=user_id, permissions=permissions)
-        await update.message.reply_text(f"🔊 User {user_id} এখন কথা বলতে পারবে।")
-    except Exception as e: await update.message.reply_text(f"Error: {e}")
-
-async def slow_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
-    try:
-        seconds = int(context.args[0])
-        await context.bot.set_chat_slow_mode_delay(chat_id=GROUP_ID, delay=seconds)
-        await update.message.reply_text(f"⏳ স্লো-মোড {seconds} সেকেন্ড সেট করা হয়েছে।")
-    except Exception as e: await update.message.reply_text(f"Error: {e}")
-
-async def pin_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
-    try:
-        msg_id = int(context.args[0])
-        await context.bot.pin_chat_message(chat_id=GROUP_ID, message_id=msg_id)
-        await update.message.reply_text("📌 মেসেজ পিন করা হয়েছে।")
-    except Exception as e: await update.message.reply_text(f"Error: {e}")
-
-async def handle_group_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """গ্রুপের মেসেজ মনিটর এবং অটো-আইডি জেনারেট করা"""
+# ৪. গ্রুপের মেসেজ স্ক্যান ও আইডি জেনারেশন
+async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != GROUP_ID or update.effective_user.id == ADMIN_ID:
         return
 
-    text = update.message.text or update.message.caption or ""
-    
-    # লিঙ্ক ডিটেকশন ও ডিলিট
+    msg = update.message
+    text = msg.text or msg.caption or ""
+
+    # অটো লিঙ্ক ডিলিট
     if re.search(URL_PATTERN, text):
-        await update.message.delete()
-        return
+        try:
+            await msg.delete()
+            return
+        except: pass
 
-    # ইউজারের মেসেজটি বটের মাধ্যমে নতুন করে পাঠানো (যাতে আপনি আইডি পান)
-    user_name = update.effective_user.first_name
-    user_id = update.effective_user.id
-    original_msg_id = update.message.message_id
-
+    # ইউজারের মেসেজ ডিলিট করে বটের মাধ্যমে পাঠানো (আইডি সহ)
     try:
-        prefix = f"🆔 ID: <code>{original_msg_id}</code>\n👤 User: <b>{user_name}</b> (<code>{user_id}</code>)\n\n"
-        
-        if update.message.text:
-            await context.bot.send_message(chat_id=GROUP_ID, text=prefix + text, parse_mode=ParseMode.HTML)
-        elif update.message.photo:
-            await context.bot.send_photo(chat_id=GROUP_ID, photo=update.message.photo[-1].file_id, caption=prefix + text, parse_mode=ParseMode.HTML)
-        
-        # আসল মেসেজ ডিলিট (যাতে বটের মেসেজটাই গ্রুপে থাকে)
-        await update.message.delete()
-    except Exception as e:
-        logging.error(f"Error in group logic: {e}")
+        user_info = f"👤 **{msg.from_user.first_name}**\n"
+        sent_msg = None
 
-async def admin_private_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """এডমিন প্রাইভেটে যা লিখবে তা গ্রুপে যাবে (বট হিসেবে)"""
+        if msg.text:
+            sent_msg = await context.bot.send_message(GROUP_ID, f"{user_info}{msg.text}")
+        elif msg.photo:
+            sent_msg = await context.bot.send_photo(GROUP_ID, msg.photo[-1].file_id, caption=f"{user_info}{text}")
+        elif msg.video:
+            sent_msg = await context.bot.send_video(GROUP_ID, msg.video.file_id, caption=f"{user_info}{text}")
+
+        if sent_msg:
+            # নতুন আইডি আপডেট করা যাতে আপনি রিপ্লাই দিতে পারেন
+            new_id = sent_msg.message_id
+            header = f"🆔 ID: ` {new_id} ` | UserID: ` {msg.from_user.id} `\n"
+            if sent_msg.text:
+                await sent_msg.edit_text(f"{header}{user_info}{msg.text}", parse_mode=ParseMode.MARKDOWN)
+            else:
+                await sent_msg.edit_caption(caption=f"{header}{user_info}{text}", parse_mode=ParseMode.MARKDOWN)
+            
+            await msg.delete() # অরিজিনাল মেসেজ ডিলিট
+    except Exception as e:
+        logging.error(f"Error: {e}")
+
+# ৫. সকল এডমিন একশন (Ban, Mute, Kick, Pin, Del)
+async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
-    
+    text = update.message.text.split()
+    cmd = text[0].lower()
+
+    try:
+        if cmd == "/reply":
+            target_id = int(text[1])
+            reply_txt = " ".join(text[2:])
+            await context.bot.send_message(GROUP_ID, reply_txt, reply_to_message_id=target_id)
+        
+        elif cmd == "/del":
+            await context.bot.delete_message(GROUP_ID, int(text[1]))
+
+        elif cmd == "/ban":
+            await context.bot.ban_chat_member(GROUP_ID, int(text[1]))
+            await update.message.reply_text("✅ ইউজার ব্যান করা হয়েছে।")
+
+        elif cmd == "/mute":
+            await context.bot.restrict_chat_member(GROUP_ID, int(text[1]), permissions=ChatPermissions(can_send_messages=False))
+            await update.message.reply_text("🔇 ইউজার মিউট করা হয়েছে।")
+
+        elif cmd == "/unmute":
+            perms = ChatPermissions(can_send_messages=True, can_send_media_messages=True, can_send_other_messages=True, can_add_web_page_previews=True)
+            await context.bot.restrict_chat_member(GROUP_ID, int(text[1]), permissions=perms)
+            await update.message.reply_text("🔊 মিউট খোলা হয়েছে।")
+
+        elif cmd == "/pin":
+            await context.bot.pin_chat_message(GROUP_ID, int(text[1]))
+            await update.message.reply_text("📌 মেসেজ পিন করা হয়েছে।")
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ এরর: {e}")
+
+# ৬. প্রাইভেট মেসেজ সরাসরি গ্রুপে পাঠানো
+async def private_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID or update.message.text.startswith('/'): return
     try:
         if update.message.text:
-            await context.bot.send_message(chat_id=GROUP_ID, text=update.message.text)
+            await context.bot.send_message(GROUP_ID, update.message.text)
         elif update.message.photo:
-            await context.bot.send_photo(chat_id=GROUP_ID, photo=update.message.photo[-1].file_id, caption=update.message.caption)
-        await update.message.reply_text("✅ গ্রুপে প্রচার করা হয়েছে।")
+            await context.bot.send_photo(GROUP_ID, update.message.photo[-1].file_id, caption=update.message.caption)
+        await update.message.reply_text("✅ গ্রুপে পাঠানো হয়েছে।")
     except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
-
-# --- মেইন ফাংশন ---
+        await update.message.reply_text(f"❌ এরর: {e}")
 
 if __name__ == '__main__':
-    # ফ্লাস্ক সার্ভার থ্রেড চালু
     threading.Thread(target=run_web_server, daemon=True).start()
-
     app = ApplicationBuilder().token(TOKEN).build()
-
-    # কমান্ড হ্যান্ডলার
+    
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("ban", ban_user))
-    app.add_handler(CommandHandler("mute", mute_user))
-    app.add_handler(CommandHandler("unmute", unmute_user))
-    app.add_handler(CommandHandler("slow", slow_mode))
-    app.add_handler(CommandHandler("pin", pin_message))
-    app.add_handler(CommandHandler("reply", admin_private_proxy)) # আপনি চাইলে আরও কাস্টমাইজ করতে পারেন
-
-    # গ্রুপ ফিল্টার এবং প্রাইভেট মেসেজ প্রক্সি
-    app.add_handler(MessageHandler(filters.Chat(GROUP_ID) & (~filters.COMMAND), handle_group_logic))
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (~filters.COMMAND), admin_private_proxy))
-
-    print("Bot is running...")
+    app.add_handler(CommandHandler(["reply", "del", "ban", "mute", "unmute", "pin"], admin_commands))
+    app.add_handler(MessageHandler(filters.Chat(GROUP_ID) & (~filters.COMMAND), handle_group_messages))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (~filters.COMMAND), private_to_group))
+    
     app.run_polling()
