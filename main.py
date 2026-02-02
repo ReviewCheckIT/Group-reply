@@ -5,8 +5,8 @@ import re
 import html
 from datetime import datetime, timedelta
 from flask import Flask
-from telegram import Update, ChatMember
-from telegram.constants import ParseMode, ChatMemberStatus
+from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from groq import Groq
 
@@ -25,26 +25,20 @@ def run_web_server():
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 TOKEN = os.getenv("BOT_TOKEN")
-# মেইন ওনারের আইডি (ব্যাকআপ হিসেবে)
 ADMIN_ID = int(os.getenv("ADMIN_ID")) 
 GROUP_ID = int(os.getenv("GROUP_ID"))
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# লিংক প্যাটার্ন
 URL_PATTERN = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+|t\.me/\S+'
 
 client = Groq(api_key=GROQ_API_KEY)
 
-# ইউজার ট্র্যাকিং মেমোরি
 user_first_seen = {}
-
-# এডমিন ক্যাশ
 admin_cache = {
     "ids": [],
     "last_updated": datetime.min
 }
 
-# ৩. সিস্টেম প্রম্পট (আপডেট করা হয়েছে: নাম পাকিজা)
 SYSTEM_PROMPT = """
 আপনার নাম 'পাকিজা' (Pakiza)। আপনি Skyzone IT গ্রুপের একজন বিশ্বস্ত এবং প্রফেশনাল টিম মেম্বার। আপনি কোনো রোবট নন, আপনি একজন মানুষ হিসেবে কথা বলবেন।
 
@@ -60,10 +54,12 @@ SYSTEM_PROMPT = """
 গোপন নির্দেশনা: আপনি জানেন যে ২৪ ঘণ্টা রিভিউ লাইভ থাকার পর তাদের নেওয়া হয়েছে, কিন্তু এই টেকনিক্যাল কথাগুলো ইউজারকে আগ বাড়িয়ে বলার দরকার নেই। শুধু নির্দেশনা দিন।
 """
 
-# এআই রেসপন্স জেনারেটর
+# এরর হ্যান্ডলার (নতুন যুক্ত করা হয়েছে)
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logging.error(msg="Exception while handling an update:", exc_info=context.error)
+
 async def get_ai_response(user_text, user_name, specific_instruction=None):
     try:
-        # যদি এডমিন কোনো স্পেশাল ইন্সট্রাকশন দেয়, সেটা সিস্টেম প্রম্পটের সাথে যুক্ত হবে
         system_content = SYSTEM_PROMPT
         if specific_instruction:
             system_content += f"\n\n[ADMIN INSTRUCTION: {specific_instruction}]"
@@ -83,7 +79,6 @@ async def get_ai_response(user_text, user_name, specific_instruction=None):
         logging.error(f"AI Error: {e}")
         return None
 
-# এডমিন লিস্ট আপডেট করার ফাংশন
 async def get_group_admins(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     global admin_cache
     now = datetime.now()
@@ -101,7 +96,6 @@ async def get_group_admins(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
             
     return admin_cache["ids"]
 
-# ৫. গ্রুপ মেসেজ হ্যান্ডলার (আপডেটেড লজিক)
 async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or update.effective_chat.id != GROUP_ID:
         return
@@ -110,28 +104,20 @@ async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TY
     text = update.message.text or update.message.caption or ""
     msg_date = datetime.now()
 
-    # ১. এডমিন চেক এবং পাকিজা লজিক
-    # ---------------------------------------------------------
     current_admins = await get_group_admins(context, GROUP_ID)
     is_admin = user.id in current_admins or user.id == ADMIN_ID
 
     if is_admin:
         lower_text = text.lower()
-        # যদি এডমিন 'Pakiza' বা 'পাকিজা' নাম উল্লেখ করে
         if "pakiza" in lower_text or "পাকিজা" in text:
-            
-            # ক) স্ট্যাটাস চেক (Pakiza active/online/acho?)
             if any(w in lower_text for w in ['online', 'active', 'acho', 'aso', 'live', 'lines']):
                 await update.message.reply_text("জি এডমিন, আমি অ্যাক্টিভ আছি। বলুন কিভাবে সাহায্য করতে পারি?")
                 return
 
-            # খ) এডমিন যদি রিপ্লাই দিয়ে ইউজারকে হেল্প করতে বলে
-            # (যেমন: এডমিন ইউজারের মেসেজে রিপ্লাই দিয়ে বলল "Pakiza guide him")
             if update.message.reply_to_message:
                 target_user = update.message.reply_to_message.from_user
                 original_user_text = update.message.reply_to_message.text or "Need Help"
                 
-                # এআই কল করা হবে ইউজারের হয়ে, কিন্তু এডমিনের নির্দেশে
                 ai_reply = await get_ai_response(
                     original_user_text, 
                     target_user.first_name, 
@@ -139,35 +125,24 @@ async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TY
                 )
                 
                 if ai_reply:
-                    # রিপ্লাইটি যাবে অরিজিনাল ইউজারের মেসেজে
                     await update.message.reply_to_message.reply_text(
                         ai_reply,
                         parse_mode=ParseMode.HTML
                     )
                 return
-
-        # যদি 'Pakiza' না ডাকে, তবে এডমিনকে ইগনোর করবে (আগের রুল)
         return
 
-    # ২. লিংক ডিলিট সেকশন
-    # ---------------------------------------------------------
     if re.search(URL_PATTERN, text):
         try:
             await update.message.delete()
             return 
         except: pass
 
-    # ৩. এডমিন ইন্টারঅ্যাকশন চেক (Reply to Admin)
-    # ---------------------------------------------------------
     if update.message.reply_to_message:
         replied_user_id = update.message.reply_to_message.from_user.id
         if replied_user_id in current_admins or replied_user_id == ADMIN_ID:
-            # এডমিনের রিপ্লাই হলেও, যদি এডমিন নিজেই পাকিজাকে মেনশন করে থাকে তবে সেটা হ্যান্ডেল হবে (উপরের লজিকে)।
-            # কিন্তু সাধারণ ইউজার এডমিনকে রিপ্লাই দিলে বট চুপ থাকবে।
             return
 
-    # ৪. পুরাতন মেম্বার চেক (৭ দিনের লজিক)
-    # ---------------------------------------------------------
     if user.id not in user_first_seen:
         user_first_seen[user.id] = msg_date
     
@@ -178,22 +153,14 @@ async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TY
         logging.info(f"User {user.first_name} is old ({days_passed} days). Ignoring.")
         return
 
-    # ৫. এআই রেসপন্স (সাধারণ ইউজারদের জন্য)
-    # ---------------------------------------------------------
     try:
         await context.bot.send_chat_action(chat_id=GROUP_ID, action="typing")
-        
         ai_reply = await get_ai_response(text, user.first_name)
-        
         if ai_reply:
-            await update.message.reply_text(
-                ai_reply,
-                parse_mode=ParseMode.HTML
-            )
+            await update.message.reply_text(ai_reply, parse_mode=ParseMode.HTML)
     except Exception as e:
         logging.error(f"Reply Error: {e}")
 
-# ৬. স্টার্ট কমান্ড
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id == ADMIN_ID:
         await update.message.reply_text("✅ পাকিজা (Pakiza) এখন অ্যাক্টিভ! এডমিন কন্ট্রোল যুক্ত করা হয়েছে।")
@@ -203,8 +170,12 @@ if __name__ == '__main__':
     
     app = ApplicationBuilder().token(TOKEN).build()
     
+    # এখানে হ্যান্ডলারগুলো অ্যাড করা হয়েছে
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Chat(GROUP_ID) & (~filters.COMMAND), handle_group_messages))
     
-    print("Pakiza Bot is polling with Admin Interaction updates...")
+    # এরর হ্যান্ডলার রেজিস্ট্রেশন
+    app.add_error_handler(error_handler)
+    
+    print("Pakiza Bot is polling with ERROR HANDLER...")
     app.run_polling()
