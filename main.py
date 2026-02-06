@@ -8,7 +8,7 @@ import time
 import asyncio
 from datetime import datetime
 from flask import Flask
-# Telegram Imports (Button & Markup must be here)
+# Telegram Imports
 from telegram import Update, constants, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -65,10 +65,7 @@ def run_web_server():
 # 2. LOGIC CONSTANTS
 # ---------------------------------------------------------------------------
 
-# Unauthorized Links Pattern
 UNAUTHORIZED_LINK_PATTERN = r'(https?://(?!nexstars\.site)[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|t\.me/(?!SkyzoneIT_bot)[a-zA-Z0-9_]+)'
-
-# Official Link
 NEXSTARS_LINK = "https://nexstars.site/auth?mode=signup&ref=NEX-7944"
 
 # Spam Control
@@ -80,8 +77,16 @@ SPAM_WINDOW = 10
 admin_cache = {"ids": [], "last_updated": datetime.min}
 
 # ---------------------------------------------------------------------------
-# 3. HELPER FUNCTIONS
+# 3. HELPER FUNCTIONS (Delete Logic Added)
 # ---------------------------------------------------------------------------
+
+async def delete_later(message, delay):
+    """Waits for 'delay' seconds and then deletes the message."""
+    await asyncio.sleep(delay)
+    try:
+        await message.delete()
+    except Exception as e:
+        logger.debug(f"Message already deleted or error: {e}")
 
 async def get_user_data(user_id):
     def _fetch():
@@ -118,7 +123,7 @@ def is_spamming(user_id):
     return len(spam_tracker[user_id]) > SPAM_LIMIT
 
 # ---------------------------------------------------------------------------
-# 4. AI LOGIC (Updated Prompt)
+# 4. AI LOGIC
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """
@@ -148,7 +153,7 @@ async def get_ai_response(user_text, user_name, user_data):
         return None
 
 # ---------------------------------------------------------------------------
-# 5. TELEGRAM HANDLERS (UPDATED)
+# 5. TELEGRAM HANDLERS
 # ---------------------------------------------------------------------------
 
 async def get_group_admins(context, chat_id):
@@ -165,57 +170,53 @@ async def get_group_admins(context, chat_id):
 
 async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Main Handler for Group Messages
+    Main Handler: Button with Auto-Delete
     """
     if not update.message or not update.message.text:
         return
     
-    # Check Group ID
     if update.effective_chat.id != GROUP_ID:
         return
 
     user = update.message.from_user
-    text = update.message.text.lower() # Convert text to lowercase for easier matching
+    text = update.message.text.lower()
     
     # 1. Spam Check
     if is_spamming(user.id):
-        return # Silently ignore spam or warn
+        return 
 
-    # 2. LINK REQUEST HANDLING (Highest Priority - Before AI)
-    # We use a broad list of keywords to catch any request for a link
+    # 2. LINK REQUEST HANDLING (Auto-Delete Added)
     link_keywords = ["link", "site", "web", "লিংক", "লিঙ্ক", "ওয়েবসাইট", "রেজিষ্ট্রেশন", "রেজিস্ট্রেশন", "signup", "sign up", "join"]
     
-    # If ANY keyword is found in the message
     if any(keyword in text for keyword in link_keywords):
         try:
-            # Explicitly get bot username to ensure the link works
             bot_info = await context.bot.get_me()
             bot_username = bot_info.username
-            
-            # Create Deep Link: t.me/username?start=get_site_link
             deep_link = f"https://t.me/{bot_username}?start=get_site_link"
             
-            # Create the Button
             keyboard = [
                 [InlineKeyboardButton("📩 ইনবক্সে লিংক নিন (Click Here)", url=deep_link)]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            # Send Message with Button
-            await update.message.reply_text(
-                f"⚠️ <b>{html.escape(user.first_name)}</b>, নিরাপত্তা ও স্প্যাম এড়াতে আমরা গ্রুপে সরাসরি লিংক দিচ্ছি না।\n\n"
-                "👇 লিংকটি পেতে নিচের বাটনে ক্লিক করুন।",
+            # Send Message
+            sent_message = await update.message.reply_text(
+                f"⚠️ <b>{html.escape(user.first_name)}</b>, লিংকটি নিতে নিচের বাটনে ক্লিক করুন।\n"
+                "<i>(এই মেসেজটি ৩০ সেকেন্ড পর মুছে যাবে)</i>",
                 parse_mode=constants.ParseMode.HTML,
                 reply_markup=reply_markup
             )
-            # Log and STOP here. Do not go to AI.
+            
+            # --- AUTO DELETE TASK ---
+            # Run the delete timer in background so bot doesn't freeze
+            asyncio.create_task(delete_later(sent_message, 30)) # 30 Seconds Delay
+            
+            # Log and Stop
             await update_user_data(user.id, user.first_name, "ASKED_FOR_LINK_GROUP")
             return 
 
         except Exception as e:
             logger.error(f"Button Error: {e}")
-            # Fallback if button fails (rare)
-            await update.message.reply_text("দয়া করে আমাকে ইনবক্স করুন লিংকের জন্য।")
             return
 
     # 3. Admin & Other Logic
@@ -229,10 +230,8 @@ async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TY
         except:
             pass
 
-    # 4. AI Logic (Only runs if NO link keywords were found)
+    # 4. AI Logic
     user_data = await get_user_data(user.id) or {}
-    
-    # Send 'Typing...' action
     await context.bot.send_chat_action(chat_id=GROUP_ID, action=constants.ChatAction.TYPING)
     
     ai_reply = await get_ai_response(update.message.text, user.first_name, user_data)
@@ -245,12 +244,11 @@ async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Handles /start and Deep Linking (Payloads)
+    Handles Inbox Delivery
     """
     user = update.effective_user
-    args = context.args # Captures arguments like 'get_site_link'
+    args = context.args
 
-    # CHECK: Did the user come from the button?
     if args and args[0] == "get_site_link":
         welcome_text = (
             f"স্বাগতম <b>{html.escape(user.first_name)}</b>! 🎉\n\n"
@@ -258,13 +256,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔗 <b>Registration Link:</b>\n{NEXSTARS_LINK}\n\n"
             "অ্যাকাউন্ট করতে কোনো সমস্যা হলে গ্রুপে স্ক্রিনশটসহ জানাবেন।"
         )
-        # Send the link directly in Inbox
         await update.message.reply_text(welcome_text, parse_mode=constants.ParseMode.HTML, disable_web_page_preview=False)
         return
 
-    # Normal /start
     await update.message.reply_text(f"আসসালামু আলাইকুম {user.first_name}! আমি পাকিজা।")
-
 
 async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for member in update.message.new_chat_members:
@@ -289,10 +284,9 @@ if __name__ == '__main__':
     
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
-    # Note: Regex matching is now handled manually INSIDE the function for better control
     app.add_handler(MessageHandler(filters.Chat(GROUP_ID) & (~filters.COMMAND), handle_group_messages))
     
     app.add_error_handler(error_handler)
     
-    logger.info("🚀 Pakiza AI Bot is Running (Fixed Button Logic)...")
+    logger.info("🚀 Pakiza AI Bot is Running (Auto-Delete Enabled)...")
     app.run_polling()
