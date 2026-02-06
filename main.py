@@ -8,7 +8,8 @@ import time
 import asyncio
 from datetime import datetime
 from flask import Flask
-from telegram import Update, constants
+# Telegram Imports Updated to include Inline Keyboard
+from telegram import Update, constants, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
 # Third-party libraries
@@ -31,8 +32,8 @@ TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 GROUP_ID = int(os.getenv("GROUP_ID"))
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-FIREBASE_DB_URL = os.getenv("FIREBASE_DB_URL") # e.g., https://your-project.firebaseio.com/
-FIREBASE_CREDS_JSON = os.getenv("FIREBASE_CREDENTIALS") # The JSON string
+FIREBASE_DB_URL = os.getenv("FIREBASE_DB_URL") 
+FIREBASE_CREDS_JSON = os.getenv("FIREBASE_CREDENTIALS")
 
 # Initialize Firebase
 if not firebase_admin._apps:
@@ -64,7 +65,7 @@ def run_web_server():
 # 2. LOGIC CONSTANTS & REGEX
 # ---------------------------------------------------------------------------
 
-# Regex for detecting unauthorized external links (Keep telegram links allowed if needed, adjust as per policy)
+# Regex for detecting unauthorized external links
 UNAUTHORIZED_LINK_PATTERN = r'(https?://(?!nexstars\.site)[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|t\.me/(?!SkyzoneIT_bot)[a-zA-Z0-9_]+)'
 
 # Smart regex for asking about the website link
@@ -73,16 +74,16 @@ WEBSITE_ASK_PATTERN = r'(website|site|link|লিঙ্ক|ওয়েবসাই
 # Specific Link to provide
 NEXSTARS_LINK = "https://nexstars.site/auth?mode=signup&ref=NEX-7944"
 
-# Spam Control: {user_id: [timestamp1, timestamp2, ...]}
+# Spam Control
 spam_tracker = {}
 SPAM_LIMIT = 3
-SPAM_WINDOW = 10  # seconds
+SPAM_WINDOW = 10 
 
 # Admin Cache
 admin_cache = {"ids": [], "last_updated": datetime.min}
 
 # ---------------------------------------------------------------------------
-# 3. HELPER FUNCTIONS (Firebase & Spam)
+# 3. HELPER FUNCTIONS
 # ---------------------------------------------------------------------------
 
 async def get_user_data(user_id):
@@ -112,7 +113,6 @@ async def update_user_data(user_id, user_name, message_text):
         user_data['msg_count'] += 1
         user_data['last_interaction'] = now_str
         user_data['name'] = user_name
-        # Store a snippet of the last message for context
         user_data['last_topic'] = message_text[:50] 
         
         ref.set(user_data)
@@ -122,15 +122,10 @@ async def update_user_data(user_id, user_name, message_text):
 def is_spamming(user_id):
     """Check if user is flooding the chat."""
     current_time = time.time()
-    
     if user_id not in spam_tracker:
         spam_tracker[user_id] = []
-    
-    # Keep only timestamps within the window
     spam_tracker[user_id] = [t for t in spam_tracker[user_id] if current_time - t < SPAM_WINDOW]
-    
     spam_tracker[user_id].append(current_time)
-    
     return len(spam_tracker[user_id]) > SPAM_LIMIT
 
 # ---------------------------------------------------------------------------
@@ -147,17 +142,12 @@ You are 'Pakiza' (পাকিজা), a dedicated and professional team member 
 **Strict Rules:**
 1. **No Links First:** Do not give video/bot links immediately upon "Hi/Hello". Only engage.
 2. **Intent Analysis:** If the user specifically asks "Ki kaj?" (What is work?), only then guide them to the pinned video.
-3. **Smart Website Link:** If asking for the website registration link specifically, provide it (Handled by code, but be aware).
+3. **Website Link Requests:** If user asks for website link, DO NOT provide the link. Politely ask them to check their inbox or use the button provided (The code handles the button, you just handle the text).
 4. **Brevity:** Keep replies short and human-like.
-
-**Tone Logic:**
-- If user is NEW (< 5 messages): Be very welcoming and guiding.
-- If user is OLD/REPEATING (> 20 messages or asking same thing): Be firm but polite. "ভাইয়া, আপনাকে তো আগেই বলা হয়েছে..."
 """
 
 async def get_ai_response(user_text, user_name, user_data, specific_instruction=None):
     try:
-        # Construct Context from Firebase Data
         is_new_user = user_data.get('msg_count', 0) < 5
         last_topic = user_data.get('last_topic', 'None')
         
@@ -216,7 +206,6 @@ async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
             text=welcome_text,
             parse_mode=constants.ParseMode.HTML
         )
-        # Initialize in Firebase
         await update_user_data(member.id, member.first_name, "JOINED_GROUP")
 
 async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -239,12 +228,11 @@ async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TY
         if re.search(UNAUTHORIZED_LINK_PATTERN, text):
             try:
                 await update.message.delete()
-                # Determine tone based on history
                 return 
             except Exception as e:
                 logger.error(f"Delete error: {e}")
 
-    # 3. Admin Interaction (Direct Call)
+    # 3. Admin Interaction
     if is_admin:
         if "pakiza" in text.lower() or "পাকিজা" in text:
             await update.message.reply_text("জি, আমি আছি। বলুন কিভাবে সাহায্য করতে পারি? 👩‍💻")
@@ -253,22 +241,33 @@ async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TY
     # 4. Anti-Flood / Spam Control
     if is_spamming(user.id):
         warning_msg = await update.message.reply_text(f"⚠️ {user.first_name}, অনুগ্রহ করে স্প্যাম করবেন না। ধীরে মেসেজ দিন।")
-        # Optional: Delete the spam trigger message
-        # await update.message.delete()
-        # Clean up warning after 5 seconds to keep chat clean
         asyncio.create_task(delete_later(warning_msg, 5))
         return
 
-    # 5. Smart Website Link Detection (High Priority)
+    # 5. Smart Website Link Detection (UPDATED LOGIC)
     # Checks for "website link koi", "site link please", etc.
     if re.search(WEBSITE_ASK_PATTERN, text.lower()):
+        # Generate a Deep Link to the bot's PM
+        bot_username = context.bot.username
+        # Using Deep Linking: t.me/botname?start=get_site_link
+        deep_link_url = f"https://t.me/{bot_username}?start=get_site_link"
+        
+        keyboard = [
+            [InlineKeyboardButton("📩 ইনবক্সে লিংক নিন", url=deep_link_url)]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
         reply_text = (
-            f"✅ <b>{html.escape(user.first_name)}</b>, আমাদের অফিসিয়াল ওয়েবসাইটে যুক্ত হতে নিচের লিংকে ক্লিক করুন:\n\n"
-            f"🔗 <a href='{NEXSTARS_LINK}'>Skyzone IT Website Registration</a>\n\n"
-            "সাইন আপ করতে কোনো সমস্যা হলে জানাবেন!"
+            f"⚠️ <b>{html.escape(user.first_name)}</b>, নিরাপত্তা ও স্প্যাম এড়াতে আমরা গ্রুপে সরাসরি লিংক দিচ্ছি না।\n\n"
+            "অনুগ্রহ করে নিচের বাটনে ক্লিক করুন, আমি ইনবক্সে আপনাকে লিংক দিয়ে দিচ্ছি। 👇"
         )
-        await update.message.reply_text(reply_text, parse_mode=constants.ParseMode.HTML, disable_web_page_preview=False)
-        await update_user_data(user.id, user.first_name, text) # Log interaction
+        
+        await update.message.reply_text(
+            reply_text, 
+            parse_mode=constants.ParseMode.HTML,
+            reply_markup=reply_markup
+        )
+        await update_user_data(user.id, user.first_name, text)
         return
 
     # 6. Fetch User Context from Firebase
@@ -277,7 +276,6 @@ async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TY
     # 7. AI Generation
     await context.bot.send_chat_action(chat_id=GROUP_ID, action=constants.ChatAction.TYPING)
     
-    # Determine behavior based on data
     instruction = None
     if user_data.get('msg_count', 0) > 50:
          instruction = "User is a very old member. Be concise and professional."
@@ -287,7 +285,6 @@ async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TY
     if ai_reply:
         await update.message.reply_text(ai_reply, parse_mode=constants.ParseMode.HTML)
     
-    # 8. Update User Memory
     await update_user_data(user.id, user.first_name, text)
 
 async def delete_later(message, delay):
@@ -297,9 +294,36 @@ async def delete_later(message, delay):
     except:
         pass
 
+# Updated Start Command to handle Deep Linking
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id == ADMIN_ID:
+    user = update.effective_user
+    args = context.args # Get arguments passed with /start
+
+    # CASE A: User clicked the button in Group (Deep Link Payload)
+    if args and args[0] == "get_site_link":
+        reply_text = (
+            f"স্বাগতম <b>{html.escape(user.first_name)}</b>! 🎉\n\n"
+            f"আমাদের অফিসিয়াল ওয়েবসাইটে যুক্ত হতে নিচের লিংকে ক্লিক করুন:\n\n"
+            f"🔗 <a href='{NEXSTARS_LINK}'>Skyzone IT Website Registration</a>\n\n"
+            "সাইন আপ করতে কোনো সমস্যা হলে আমাকে জানাবেন!"
+        )
+        await update.message.reply_text(reply_text, parse_mode=constants.ParseMode.HTML)
+        # Log this interaction
+        await update_user_data(user.id, user.first_name, "RECEIVED_LINK_IN_DM")
+        return
+
+    # CASE B: Normal Start by Admin
+    if user.id == ADMIN_ID:
         await update.message.reply_text("✅ Pakiza is Online and synced with Firebase!")
+        return
+        
+    # CASE C: Normal Start by User (No payload)
+    welcome_text = (
+        f"আসসালামু আলাইকুম <b>{html.escape(user.first_name)}</b>!\n"
+        "আমি পাকিজা, Skyzone IT এর অ্যাসিস্ট্যান্ট। আমি আপনাকে কিভাবে সাহায্য করতে পারি?"
+    )
+    await update.message.reply_text(welcome_text, parse_mode=constants.ParseMode.HTML)
+    await update_user_data(user.id, user.first_name, "STARTED_BOT_DM")
 
 # ---------------------------------------------------------------------------
 # 6. MAIN EXECUTION
@@ -323,5 +347,5 @@ if __name__ == '__main__':
     
     app.add_error_handler(error_handler)
     
-    logger.info("🚀 Pakiza AI Bot is Running with Smart Features...")
+    logger.info("🚀 Pakiza AI Bot is Running with Deep-Link Feature...")
     app.run_polling()
