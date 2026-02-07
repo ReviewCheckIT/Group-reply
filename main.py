@@ -73,11 +73,13 @@ spam_tracker = {}
 SPAM_LIMIT = 3
 SPAM_WINDOW = 10 
 
-# Admin Cache
+# Admin Cache & Activity Tracker
 admin_cache = {"ids": [], "last_updated": datetime.min}
+last_admin_activity = 0  # Timestamp of last admin message
+ADMIN_SILENCE_WINDOW = 120 # Seconds (বট ২ মিনিট চুপ থাকবে যদি অ্যাডমিন কথা বলে)
 
 # ---------------------------------------------------------------------------
-# 3. HELPER FUNCTIONS (Delete Logic Added)
+# 3. HELPER FUNCTIONS
 # ---------------------------------------------------------------------------
 
 async def delete_later(message, delay):
@@ -159,10 +161,14 @@ async def get_ai_response(user_text, user_name, user_data):
 async def get_group_admins(context, chat_id):
     global admin_cache
     now = datetime.now()
+    # Cache admin list for 10 minutes to reduce API calls
     if (now - admin_cache["last_updated"]).total_seconds() > 600 or not admin_cache["ids"]:
         try:
             admins = await context.bot.get_chat_administrators(chat_id)
             admin_cache["ids"] = [admin.user.id for admin in admins]
+            # Ensure the MAIN ADMIN is always in the list
+            if ADMIN_ID not in admin_cache["ids"]:
+                admin_cache["ids"].append(ADMIN_ID)
             admin_cache["last_updated"] = now
         except Exception as e:
             logger.error(f"Failed to fetch admins: {e}")
@@ -170,8 +176,10 @@ async def get_group_admins(context, chat_id):
 
 async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Main Handler: Button with Auto-Delete
+    Main Handler with Admin Logic and Auto-Delete
     """
+    global last_admin_activity
+    
     if not update.message or not update.message.text:
         return
     
@@ -181,11 +189,37 @@ async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TY
     user = update.message.from_user
     text = update.message.text.lower()
     
-    # 1. Spam Check
+    # --- 1. ADMIN DETECTION LOGIC ---
+    admins = await get_group_admins(context, GROUP_ID)
+    is_admin = user.id in admins or user.id == ADMIN_ID
+    
+    # CASE A: If Sender is Admin -> Update Activity Time & Do NOT Reply
+    if is_admin:
+        last_admin_activity = time.time()
+        logger.info(f"Admin {user.first_name} is active. Bot entering silence mode.")
+        return
+
+    # CASE B: If User is Replying to an Admin -> Do NOT Reply
+    if update.message.reply_to_message:
+        replied_user_id = update.message.reply_to_message.from_user.id
+        if replied_user_id in admins:
+            logger.info("User replied to an admin. Bot ignoring.")
+            return
+
+    # CASE C: Check Silence Window (Typing/Active Simulation)
+    # If an admin spoke in the last 120 seconds, bot stays silent.
+    time_since_admin_msg = time.time() - last_admin_activity
+    if time_since_admin_msg < ADMIN_SILENCE_WINDOW:
+        logger.info(f"Bot silent due to recent admin activity ({int(time_since_admin_msg)}s ago).")
+        return
+
+    # --- 2. REGULAR USER LOGIC BELOW ---
+
+    # Spam Check
     if is_spamming(user.id):
         return 
 
-    # 2. LINK REQUEST HANDLING (Auto-Delete Added)
+    # Link/Signup Logic (Button with Auto-Delete)
     link_keywords = ["link", "site", "web", "লিংক", "লিঙ্ক", "ওয়েবসাইট", "রেজিষ্ট্রেশন", "রেজিস্ট্রেশন", "signup", "sign up", "join"]
     
     if any(keyword in text for keyword in link_keywords):
@@ -194,12 +228,9 @@ async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TY
             bot_username = bot_info.username
             deep_link = f"https://t.me/{bot_username}?start=get_site_link"
             
-            keyboard = [
-                [InlineKeyboardButton("📩 ইনবক্সে লিংক নিন (Click Here)", url=deep_link)]
-            ]
+            keyboard = [[InlineKeyboardButton("📩 ইনবক্সে লিংক নিন (Click Here)", url=deep_link)]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            # Send Message
             sent_message = await update.message.reply_text(
                 f"⚠️ <b>{html.escape(user.first_name)}</b>, লিংকটি নিতে নিচের বাটনে ক্লিক করুন।\n"
                 "<i>(এই মেসেজটি ৩০ সেকেন্ড পর মুছে যাবে)</i>",
@@ -207,11 +238,7 @@ async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TY
                 reply_markup=reply_markup
             )
             
-            # --- AUTO DELETE TASK ---
-            # Run the delete timer in background so bot doesn't freeze
-            asyncio.create_task(delete_later(sent_message, 30)) # 30 Seconds Delay
-            
-            # Log and Stop
+            asyncio.create_task(delete_later(sent_message, 30))
             await update_user_data(user.id, user.first_name, "ASKED_FOR_LINK_GROUP")
             return 
 
@@ -219,21 +246,25 @@ async def handle_group_messages(update: Update, context: ContextTypes.DEFAULT_TY
             logger.error(f"Button Error: {e}")
             return
 
-    # 3. Admin & Other Logic
-    admins = await get_group_admins(context, GROUP_ID)
-    is_admin = user.id in admins or user.id == ADMIN_ID
-
-    if not is_admin and re.search(UNAUTHORIZED_LINK_PATTERN, update.message.text):
+    # Delete Unauthorized Links
+    if re.search(UNAUTHORIZED_LINK_PATTERN, update.message.text):
         try:
             await update.message.delete()
             return
         except:
             pass
 
-    # 4. AI Logic
+    # AI Response
     user_data = await get_user_data(user.id) or {}
-    await context.bot.send_chat_action(chat_id=GROUP_ID, action=constants.ChatAction.TYPING)
     
+    # Add a small delay to feel natural and give admins a split second to intervene if they want
+    await context.bot.send_chat_action(chat_id=GROUP_ID, action=constants.ChatAction.TYPING)
+    await asyncio.sleep(2) 
+    
+    # Double check silence (in case admin messaged during the 2s sleep)
+    if time.time() - last_admin_activity < ADMIN_SILENCE_WINDOW:
+         return
+
     ai_reply = await get_ai_response(update.message.text, user.first_name, user_data)
     
     if ai_reply:
@@ -288,5 +319,5 @@ if __name__ == '__main__':
     
     app.add_error_handler(error_handler)
     
-    logger.info("🚀 Pakiza AI Bot is Running (Auto-Delete Enabled)...")
+    logger.info("🚀 Pakiza AI Bot is Running (Admin Priority Mode Enabled)...")
     app.run_polling()
